@@ -12,6 +12,9 @@
   --attack-btn-hover: #e05c5c;
   --attack-btn-active: #a83d3d;
   font-family: 'Orbitron', system-ui, sans-serif;
+  background: radial-gradient(circle at top, rgba(40, 76, 140, 0.35), transparent 55%),
+    radial-gradient(circle at bottom, rgba(0, 0, 0, 0.75), #020617 65%);
+  overflow: hidden;
 }
 
 .hudBar {

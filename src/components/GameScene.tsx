@@ -516,7 +516,7 @@ function Ground() {
 const BUILDING_HEIGHT = 0.8
 const BUILDING_HEALTH_COLOR = '#f59e0b'
 const BUILDING_HEALTH_EMPTY = '#3d2e1a'
-const BUILDING_GLB_SCALE = 0.5
+const BUILDING_GLB_SCALE = 0.48
 const MOUNTAIN_COLOR = '#6b7280'
 
 function BuildingModel({ row, col }: { row: number; col: number }) {
@@ -568,6 +568,64 @@ interface SceneProps {
   onHoverTile: (row: number, col: number, ctx: { isValidMove: boolean; isValidAttack: boolean }) => void
   onPlayerShakeComplete: () => void
   onEnemyShakeComplete: (positionKey: string) => void
+  attackImpacts: { id: number; position: GridCoord; source: 'player' | 'enemy' }[]
+  onAttackImpactDone: (id: number) => void
+}
+
+const ATTACK_IMPACT_DURATION_MS = 220
+const ATTACK_IMPACT_PLAYER_COLOR = '#ffd27a'
+const ATTACK_IMPACT_ENEMY_COLOR = '#ff5a7a'
+
+function AttackImpact({
+  row,
+  col,
+  source,
+  onDone,
+}: {
+  row: number
+  col: number
+  source: 'player' | 'enemy'
+  onDone: () => void
+}) {
+  const meshRef = useRef<THREE.Mesh>(null)
+  const startRef = useRef<number | null>(null)
+  const [x, z] = gridToWorld(row, col)
+  const y = TILE_HEIGHT + 0.03
+  const color = source === 'player' ? ATTACK_IMPACT_PLAYER_COLOR : ATTACK_IMPACT_ENEMY_COLOR
+
+  useFrame(() => {
+    const mesh = meshRef.current
+    if (!mesh) return
+    const mat = mesh.material as THREE.MeshBasicMaterial
+    if (!startRef.current) startRef.current = performance.now()
+    const elapsed = performance.now() - startRef.current
+    const t = Math.min(1, elapsed / ATTACK_IMPACT_DURATION_MS)
+    const easeOut = 1 - (1 - t) * (1 - t)
+    const scale = 0.55 + easeOut * 0.3
+    const opacity = 1 - t
+    mesh.scale.set(scale, scale, scale)
+    if (mat) {
+      mat.opacity = opacity
+    }
+    if (t >= 1) {
+      onDone()
+    }
+  })
+
+  return (
+    <group position={[x, y, z]} raycast={() => null}>
+      <mesh ref={meshRef} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.14, 0.36, 20]} />
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={1}
+          blending={THREE.AdditiveBlending}
+          toneMapped={false}
+        />
+      </mesh>
+    </group>
+  )
 }
 
 function Scene({
@@ -590,6 +648,8 @@ function Scene({
   onHoverTile,
   onPlayerShakeComplete,
   onEnemyShakeComplete,
+  attackImpacts,
+  onAttackImpactDone,
 }: SceneProps) {
   const aliveBuildings = buildings.filter((b) => b.health > 0)
   const showPlayer = playerHealth > 0 || (playerHealth === 0 && !playerRemoved)
@@ -709,6 +769,15 @@ function Scene({
           ) : null
         )}
       </Suspense>
+      {attackImpacts.map((impact) => (
+        <AttackImpact
+          key={impact.id}
+          row={impact.position[0]}
+          col={impact.position[1]}
+          source={impact.source}
+          onDone={() => onAttackImpactDone(impact.id)}
+        />
+      ))}
     </>
   )
 }
@@ -801,12 +870,26 @@ export function GameScene() {
       return move
     })
   )
+  /** Enemy attack tiles decided once at start of player turn; not updated when player moves. */
+  const [lockedEnemyAttackTiles, setLockedEnemyAttackTiles] = useState<(GridCoord | null)[]>(() =>
+    INITIAL_ENEMIES.map((e, i) => {
+      const others = INITIAL_ENEMIES.filter((_, j) => j !== i)
+      const occ = getOccupiedTiles(INITIAL_PLAYER, others, INITIAL_BUILDINGS, MOUNTAINS)
+      occ.delete(coordKey(e.position))
+      const { move } = getEnemyTelegraphs(e.position, INITIAL_PLAYER, occ, INITIAL_BUILDINGS)
+      return move ? getEnemyAttackTileWithPriority(move, INITIAL_PLAYER, INITIAL_BUILDINGS) : null
+    })
+  )
   const [playerShakeUntil, setPlayerShakeUntil] = useState(0)
   const [playerRemoved, setPlayerRemoved] = useState(false)
   const [buildings, setBuildings] = useState<BuildingState[]>(() =>
     INITIAL_BUILDINGS.map((b) => ({ ...b }))
   )
   const [gameOver, setGameOver] = useState(false)
+  const [attackImpacts, setAttackImpacts] = useState<
+    { id: number; position: GridCoord; source: 'player' | 'enemy' }[]
+  >([])
+  const nextImpactIdRef = useRef(0)
   const enemiesRef = useRef(enemies)
   enemiesRef.current = enemies
 
@@ -822,8 +905,7 @@ export function GameScene() {
   )
   const attackPreviewTiles = enemies.flatMap((e, i) => {
     if (e.health <= 0) return []
-    const move = enemyMoveTelegraphs[i] ?? e.position
-    const t = getEnemyAttackTileWithPriority(move, playerPosition, buildings)
+    const t = lockedEnemyAttackTiles[i] ?? null
     return t ? [t] : []
   })
 
@@ -857,26 +939,54 @@ export function GameScene() {
         if (e.health <= 0) return
         const attackTile = getEnemyAttackTileWithPriority(e.position, playerPosition, buildings)
         if (!attackTile) return
-        if (playerPosition[0] === attackTile[0] && playerPosition[1] === attackTile[1]) {
+
+        const hitsPlayer =
+          playerPosition[0] === attackTile[0] && playerPosition[1] === attackTile[1]
+        const hitsBuilding = buildings.some(
+          (b) => b.health > 0 && b.position[0] === attackTile[0] && b.position[1] === attackTile[1]
+        )
+
+        if (hitsPlayer) {
           setPlayerHealth((h) => Math.max(0, h - 1))
           setPlayerShakeUntil(performance.now() + 250)
         }
-        setBuildings((prev) =>
-          prev.map((b) =>
-            b.position[0] === attackTile[0] && b.position[1] === attackTile[1]
-              ? { ...b, health: Math.max(0, b.health - 1) }
-              : b
+
+        if (hitsBuilding) {
+          setBuildings((prev) =>
+            prev.map((b) =>
+              b.position[0] === attackTile[0] && b.position[1] === attackTile[1]
+                ? { ...b, health: Math.max(0, b.health - 1) }
+                : b
+            )
           )
-        )
+        }
+
+        if (hitsPlayer || hitsBuilding) {
+          const impactTile = attackTile
+          setAttackImpacts((prev) => [
+            ...prev,
+            {
+              id: nextImpactIdRef.current++,
+              position: impactTile,
+              source: 'enemy',
+            },
+          ])
+        }
       })
       setEnemies(newEnemies)
-      setEnemyMoveTelegraphs(
-        newEnemies.map((e) => {
+      const nextTelegraphs = newEnemies.map((e) => {
+        if (e.health <= 0) return null
+        const occ = getOccupiedTiles(playerPosition, newEnemies, buildings, MOUNTAINS)
+        occ.delete(coordKey(e.position))
+        const { move } = getEnemyTelegraphs(e.position, playerPosition, occ, buildings)
+        return move
+      })
+      setEnemyMoveTelegraphs(nextTelegraphs)
+      setLockedEnemyAttackTiles(
+        newEnemies.map((e, i) => {
           if (e.health <= 0) return null
-          const occ = getOccupiedTiles(playerPosition, newEnemies, buildings, MOUNTAINS)
-          occ.delete(coordKey(e.position))
-          const { move } = getEnemyTelegraphs(e.position, playerPosition, occ, buildings)
-          return move
+          const move = nextTelegraphs[i] ?? e.position
+          return getEnemyAttackTileWithPriority(move, playerPosition, buildings)
         })
       )
       setPlayerHasMovedThisTurn(false)
@@ -940,6 +1050,14 @@ export function GameScene() {
         }
       })
     )
+    setAttackImpacts((prev) => [
+      ...prev,
+      {
+        id: nextImpactIdRef.current++,
+        position: [row, col],
+        source: 'player',
+      },
+    ])
     setPlayerPhase('move')
     setTurn('enemy')
   }
@@ -987,6 +1105,7 @@ export function GameScene() {
       })
     )
     setPlayerShakeUntil(0)
+    setAttackImpacts([])
     setPlayerRemoved(false)
     setBuildings(INITIAL_BUILDINGS.map((b) => ({ ...b })))
     setPlayerHasMovedThisTurn(false)
@@ -1046,7 +1165,12 @@ export function GameScene() {
             const idx = enemiesRef.current.findIndex((e) => coordKey(e.position) === positionKey)
             setEnemies((prev) => prev.filter((e) => coordKey(e.position) !== positionKey))
             setEnemyMoveTelegraphs((prev) => (idx >= 0 ? prev.filter((_, i) => i !== idx) : prev))
+            setLockedEnemyAttackTiles((prev) => (idx >= 0 ? prev.filter((_, i) => i !== idx) : prev))
           }}
+          attackImpacts={attackImpacts}
+          onAttackImpactDone={(id) =>
+            setAttackImpacts((prev) => prev.filter((impact) => impact.id !== id))
+          }
         />
       </Canvas>
       <header className="hudBar">
