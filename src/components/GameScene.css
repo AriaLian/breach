@@ -1,0 +1,202 @@
+/* Game HUD - tactical overlay */
+.gameSceneRoot {
+  --hud-bg: rgba(12, 18, 32, 0.88);
+  --hud-border: rgba(74, 107, 181, 0.35);
+  --hud-text: #e8ecf4;
+  --hud-muted: #8b9dc3;
+  --player-accent: #34c759;
+  --player-bg: rgba(52, 199, 89, 0.15);
+  --enemy-accent: #e74c3c;
+  --enemy-bg: rgba(231, 76, 60, 0.15);
+  --attack-btn: #c94a4a;
+  --attack-btn-hover: #e05c5c;
+  --attack-btn-active: #a83d3d;
+  font-family: 'Orbitron', system-ui, sans-serif;
+}
+
+.hudBar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px 14px;
+  pointer-events: none;
+  background: linear-gradient(180deg, var(--hud-bg) 0%, rgba(12, 18, 32, 0.75) 100%);
+  border-bottom: 1px solid var(--hud-border);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.hudBar > * {
+  pointer-events: auto;
+}
+
+.hudLeft {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.turnBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hud-text);
+}
+
+.turnBadge.player {
+  background: var(--player-bg);
+  border: 1px solid rgba(52, 199, 89, 0.4);
+  color: #7ee08a;
+}
+
+.turnBadge.enemy {
+  background: var(--enemy-bg);
+  border: 1px solid rgba(231, 76, 60, 0.4);
+  color: #f5a5a5;
+}
+
+.phaseChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--hud-muted);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.healthStrip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.healthStripLabel {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hud-muted);
+  margin-right: 4px;
+}
+
+.healthSegment {
+  width: 10px;
+  height: 14px;
+  border-radius: 3px;
+  transition: background 0.2s ease;
+}
+
+.healthSegment.filled {
+  background: var(--player-accent);
+  box-shadow: 0 0 10px rgba(52, 199, 89, 0.4);
+}
+
+.healthSegment.empty {
+  background: rgba(26, 61, 36, 0.6);
+  border: 1px solid rgba(52, 199, 89, 0.2);
+}
+
+.hudRight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.attackBtn {
+  font-family: 'Orbitron', system-ui, sans-serif;
+  padding: 10px 22px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #fff;
+  background: linear-gradient(180deg, var(--attack-btn) 0%, var(--attack-btn-active) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.2s ease, background 0.2s ease;
+  box-shadow: 0 2px 8px rgba(201, 74, 74, 0.35);
+}
+
+.attackBtn:hover {
+  background: linear-gradient(180deg, var(--attack-btn-hover) 0%, var(--attack-btn) 100%);
+  box-shadow: 0 4px 14px rgba(201, 74, 74, 0.45);
+  transform: translateY(-1px);
+}
+
+.attackBtn:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(201, 74, 74, 0.4);
+}
+
+.attackBtn:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.5);
+  outline-offset: 2px;
+}
+
+.endTurnBtn {
+  font-family: 'Orbitron', system-ui, sans-serif;
+  padding: 10px 22px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #e8ecf4;
+  background: rgba(74, 107, 181, 0.35);
+  border: 1px solid rgba(74, 107, 181, 0.5);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.endTurnBtn:hover {
+  background: rgba(74, 107, 181, 0.5);
+  border-color: rgba(74, 107, 181, 0.7);
+  transform: translateY(-1px);
+}
+
+.endTurnBtn:active {
+  transform: translateY(0);
+}
+
+.endTurnBtn:focus-visible {
+  outline: 2px solid rgba(74, 107, 181, 0.8);
+  outline-offset: 2px;
+}
+
+.hintText {
+  font-size: 11px;
+  color: var(--hud-muted);
+  letter-spacing: 0.04em;
+  max-width: 200px;
+  line-height: 1.4;
+}
+
+/* Subtle bottom edge highlight */
+.gameSceneRoot::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(74, 107, 181, 0.25), transparent);
+  z-index: 1;
+}
