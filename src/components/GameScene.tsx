@@ -1,6 +1,6 @@
 import React, { Suspense, useEffect, useRef, useState } from 'react'
 import { Canvas, type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
-import { useGLTF } from '@react-three/drei'
+import { useGLTF, Line } from '@react-three/drei'
 import * as THREE from 'three'
 import './GameScene.css'
 import ScoutModel from '../assets/models/Mech.glb?url'
@@ -33,31 +33,45 @@ function gridToWorld(row: number, col: number): [number, number] {
   return [x, z]
 }
 
-/** Manhattan distance between two grid cells. */
-function gridDistance(a: GridCoord, b: GridCoord): number {
-  return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1])
-}
-
 /** River tiles (water); stepping or being pushed here = drown. */
 const RIVER_TILES: GridCoord[] = [
-  [4, 2], [4, 3], [4, 4], [4, 5], [4, 6],
+  [4, 3], [4, 4], [4, 5], [4, 6],
 ]
 function isRiverTile(coord: GridCoord): boolean {
   return RIVER_TILES.some(([r, c]) => r === coord[0] && c === coord[1])
 }
 
-/** Tiles the player can move to (within range, not occupied, not river). */
-function getValidMoveTiles(playerPos: GridCoord, occupied: Set<string>): Set<string> {
+/** Four-direction neighbors (row, col). */
+const CARDINAL_OFFSETS: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
+
+/** Tiles reachable from start in at most maxSteps steps without stepping on occupied or river. */
+function getReachableTiles(start: GridCoord, occupied: Set<string>, maxSteps: number): Set<string> {
   const out = new Set<string>()
-  for (let r = 0; r < GRID_SIZE; r++) {
-    for (let c = 0; c < GRID_SIZE; c++) {
-      const key = `${r},${c}`
-      if (gridDistance([r, c], playerPos) <= PLAYER_MOVE_RANGE && gridDistance([r, c], playerPos) > 0 && !occupied.has(key) && !isRiverTile([r, c])) {
+  const visited = new Set<string>()
+  visited.add(coordKey(start))
+  let frontier: GridCoord[] = [start]
+  for (let step = 0; step < maxSteps && frontier.length > 0; step++) {
+    const nextFrontier: GridCoord[] = []
+    for (const [r, c] of frontier) {
+      for (const [dr, dc] of CARDINAL_OFFSETS) {
+        const r2 = r + dr
+        const c2 = c + dc
+        if (r2 < 0 || r2 >= GRID_SIZE || c2 < 0 || c2 >= GRID_SIZE) continue
+        const key = `${r2},${c2}`
+        if (visited.has(key) || occupied.has(key) || isRiverTile([r2, c2])) continue
+        visited.add(key)
         out.add(key)
+        nextFrontier.push([r2, c2])
       }
     }
+    frontier = nextFrontier
   }
   return out
+}
+
+/** Tiles the player can move to (reachable in PLAYER_MOVE_RANGE steps without crossing occupied or river). */
+function getValidMoveTiles(playerPos: GridCoord, occupied: Set<string>): Set<string> {
+  return getReachableTiles(playerPos, occupied, PLAYER_MOVE_RANGE)
 }
 
 function coordKey(c: GridCoord): string {
@@ -80,20 +94,72 @@ function oneStepToward(pos: GridCoord, target: GridCoord): GridCoord | null {
   return [r2, c2]
 }
 
-/** Enemy move tile: up to ENEMY_MOVE_RANGE steps toward the player, never onto an occupied tile. */
+/** Path from `from` to `to` avoiding occupied and river tiles (BFS). Returns [] if unreachable. */
+function getPath(from: GridCoord, to: GridCoord, occupied: Set<string>): GridCoord[] {
+  if (from[0] === to[0] && from[1] === to[1]) return [from]
+  const visited = new Set<string>()
+  visited.add(coordKey(from))
+  const parent = new Map<string, GridCoord>()
+  let frontier: GridCoord[] = [from]
+  while (frontier.length > 0) {
+    const nextFrontier: GridCoord[] = []
+    for (const [r, c] of frontier) {
+      for (const [dr, dc] of CARDINAL_OFFSETS) {
+        const r2 = r + dr
+        const c2 = c + dc
+        if (r2 < 0 || r2 >= GRID_SIZE || c2 < 0 || c2 >= GRID_SIZE) continue
+        const key = `${r2},${c2}`
+        if (visited.has(key) || occupied.has(key) || isRiverTile([r2, c2])) continue
+        visited.add(key)
+        parent.set(key, [r, c])
+        if (r2 === to[0] && c2 === to[1]) {
+          const path: GridCoord[] = [[r2, c2]]
+          let back: GridCoord = [r, c]
+          while (back[0] !== from[0] || back[1] !== from[1]) {
+            path.unshift(back)
+            const k = coordKey(back)
+            back = parent.get(k)!
+          }
+          path.unshift(from)
+          return path
+        }
+        nextFrontier.push([r2, c2])
+      }
+    }
+    frontier = nextFrontier
+  }
+  return []
+}
+
+/** Enemy move tile: up to ENEMY_MOVE_RANGE steps toward the player, never onto occupied or river. */
 function getEnemyMoveTile(enemyPos: GridCoord, playerPos: GridCoord, occupied: Set<string>): GridCoord | null {
   let tile: GridCoord | null = enemyPos
   for (let i = 0; i < ENEMY_MOVE_RANGE; i++) {
     const next: GridCoord | null = tile ? oneStepToward(tile, playerPos) : null
     if (!next || (next[0] === tile![0] && next[1] === tile![1])) break
-    if (occupied.has(coordKey(next))) break
+    const key = coordKey(next)
+    if (occupied.has(key) || isRiverTile(next)) break
     tile = next
   }
   return tile && (tile[0] !== enemyPos[0] || tile[1] !== enemyPos[1]) ? tile : null
 }
 
-/** Tile in front of the enemy (one step from enemy toward player). Attack is relative to enemy's current position. */
-function getEnemyAttackTile(enemyPos: GridCoord, playerPos: GridCoord): GridCoord | null {
+/** Attack tile with priority: building first, then player. Enemy can attack any of 4 adjacent tiles. */
+function getEnemyAttackTileWithPriority(
+  enemyPos: GridCoord,
+  playerPos: GridCoord,
+  buildings: BuildingState[]
+): GridCoord | null {
+  const [r, c] = enemyPos
+  for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+    const r2 = r + dr
+    const c2 = c + dc
+    if (r2 < 0 || r2 >= GRID_SIZE || c2 < 0 || c2 >= GRID_SIZE) continue
+    const isBuilding = buildings.some(
+      (b) => b.health > 0 && b.position[0] === r2 && b.position[1] === c2
+    )
+    if (isBuilding) return [r2, c2]
+  }
   return oneStepToward(enemyPos, playerPos)
 }
 
@@ -258,7 +324,54 @@ function TacticalGrid({
     }
   }
 
-  return <>{tiles}</>
+  const pathPreview =
+    canMove && hoveredTile && validMoves.has(coordKey(hoveredTile))
+      ? getPath(playerPosition, hoveredTile, occupiedTiles)
+      : []
+
+  return (
+    <>
+      {tiles}
+      {pathPreview.length > 1 && <PathPreview path={pathPreview} />}
+    </>
+  )
+}
+
+const PATH_PREVIEW_Y = TILE_HEIGHT + 0.06
+const PATH_LINE_COLOR = '#5a8fd4'
+const PATH_NODE_COLOR = '#7ab0e8'
+const ENEMY_PATH_LINE_COLOR = '#e58c8c'
+const ENEMY_PATH_NODE_COLOR = '#f2b3b3'
+
+function PathPreview({
+  path,
+  color = PATH_LINE_COLOR,
+  nodeColor = PATH_NODE_COLOR,
+}: {
+  path: GridCoord[]
+  color?: string
+  nodeColor?: string
+}) {
+  const points = React.useMemo(() => {
+    return path.map(([r, c]) => {
+      const [x, z] = gridToWorld(r, c)
+      return [x, PATH_PREVIEW_Y, z] as [number, number, number]
+    })
+  }, [path])
+
+  if (points.length < 2) return null
+
+  return (
+    <group raycast={() => null}>
+      <Line points={points} color={color} lineWidth={2} />
+      {points.map((p, i) => (
+        <mesh key={i} position={[p[0], p[1], p[2]]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.12, 0.2, 16]} />
+          <meshBasicMaterial color={nodeColor} side={THREE.DoubleSide} toneMapped={false} />
+        </mesh>
+      ))}
+    </group>
+  )
 }
 
 interface GridModelProps {
@@ -446,6 +559,7 @@ interface SceneProps {
   enemies: EnemyState[]
   buildings: BuildingState[]
   attackPreviewTiles: GridCoord[]
+  enemyMoveTelegraphs: GridCoordNull[]
   occupiedTiles: Set<string>
   canMoveThisTurn: boolean
   validAttackTiles: Set<string>
@@ -453,7 +567,7 @@ interface SceneProps {
   onPlayerAttack: (row: number, col: number) => void
   onHoverTile: (row: number, col: number, ctx: { isValidMove: boolean; isValidAttack: boolean }) => void
   onPlayerShakeComplete: () => void
-  onEnemyShakeComplete: (index: number) => void
+  onEnemyShakeComplete: (positionKey: string) => void
 }
 
 function Scene({
@@ -467,6 +581,7 @@ function Scene({
   enemies,
   buildings,
   attackPreviewTiles,
+  enemyMoveTelegraphs,
   occupiedTiles,
   canMoveThisTurn,
   validAttackTiles,
@@ -478,6 +593,15 @@ function Scene({
 }: SceneProps) {
   const aliveBuildings = buildings.filter((b) => b.health > 0)
   const showPlayer = playerHealth > 0 || (playerHealth === 0 && !playerRemoved)
+  const enemyPaths: (GridCoord[] | null)[] = enemies.map((e, i) => {
+    if (e.health <= 0) return null
+    const move = enemyMoveTelegraphs[i]
+    if (!move) return null
+    const occ = new Set(occupiedTiles)
+    occ.delete(coordKey(e.position))
+    const path = getPath(e.position, move, occ)
+    return path.length > 1 ? path : null
+  })
   return (
     <>
       <CameraLookAt />
@@ -506,6 +630,17 @@ function Scene({
         onPlayerAttack={onPlayerAttack}
         onHoverTile={onHoverTile}
       />
+      {enemyPaths.map(
+        (path, i) =>
+          path && (
+            <PathPreview
+              key={`enemy-path-${i}`}
+              path={path}
+              color={ENEMY_PATH_LINE_COLOR}
+              nodeColor={ENEMY_PATH_NODE_COLOR}
+            />
+          )
+      )}
       {MOUNTAINS.map(([row, col], i) => (
         <MountainModel key={`m-${i}`} row={row} col={col} />
       ))}
@@ -548,12 +683,12 @@ function Scene({
             />
           </ShakeGroup>
         )}
-        {enemies.map((enemy, i) =>
+        {enemies.map((enemy) =>
           (enemy.health > 0 || (enemy.health === 0 && enemy.shakeUntil != null)) ? (
             <ShakeGroup
-              key={i}
+              key={coordKey(enemy.position)}
               shakeUntil={enemy.shakeUntil ?? 0}
-              onShakeComplete={enemy.health === 0 ? () => onEnemyShakeComplete(i) : undefined}
+              onShakeComplete={enemy.health === 0 ? () => onEnemyShakeComplete(coordKey(enemy.position)) : undefined}
             >
               <GridModel
                 url={VerdantGuardianModel}
@@ -588,6 +723,8 @@ const INITIAL_BUILDINGS: BuildingState[] = [
   { position: [2, 3], health: MAX_HEALTH },
   { position: [5, 4], health: MAX_HEALTH },
 ]
+/** Total building HP shown on HUD; game over when this reaches 0 */
+const MAX_BUILDING_HEALTH_TOTAL = INITIAL_BUILDINGS.length * MAX_HEALTH
 const MOUNTAINS: GridCoord[] = [
   [1, 5],
   [3, 6],
@@ -610,9 +747,15 @@ const CURSOR_STYLES: Record<CursorMode, string> = {
   canNotAttack: 'not-allowed',
 }
 
-function getEnemyTelegraphs(enemyPos: GridCoord, playerPos: GridCoord, occupied: Set<string>): { move: GridCoordNull; attack: GridCoordNull } {
+function getEnemyTelegraphs(
+  enemyPos: GridCoord,
+  playerPos: GridCoord,
+  occupied: Set<string>,
+  buildings: BuildingState[]
+): { move: GridCoordNull; attack: GridCoordNull } {
+  // Always move toward the player; attack priority is handled by getEnemyAttackTileWithPriority.
   const move = getEnemyMoveTile(enemyPos, playerPos, occupied)
-  const attack = move ? getEnemyAttackTile(move, playerPos) : null
+  const attack = move ? getEnemyAttackTileWithPriority(move, playerPos, buildings) : null
   return { move, attack }
 }
 
@@ -654,7 +797,7 @@ export function GameScene() {
       const others = INITIAL_ENEMIES.filter((_, j) => j !== i)
       const occ = getOccupiedTiles(INITIAL_PLAYER, others, INITIAL_BUILDINGS, MOUNTAINS)
       occ.delete(coordKey(e.position))
-      const { move } = getEnemyTelegraphs(e.position, INITIAL_PLAYER, occ)
+      const { move } = getEnemyTelegraphs(e.position, INITIAL_PLAYER, occ, INITIAL_BUILDINGS)
       return move
     })
   )
@@ -663,8 +806,11 @@ export function GameScene() {
   const [buildings, setBuildings] = useState<BuildingState[]>(() =>
     INITIAL_BUILDINGS.map((b) => ({ ...b }))
   )
+  const [gameOver, setGameOver] = useState(false)
+  const enemiesRef = useRef(enemies)
+  enemiesRef.current = enemies
 
-  const aliveEnemies = enemies.filter((e) => e.health > 0)
+  const totalBuildingHealth = buildings.reduce((sum, b) => sum + b.health, 0)
   const [playerHasMovedThisTurn, setPlayerHasMovedThisTurn] = useState(false)
   const [cursorMode, setCursorMode] = useState<CursorMode>('selecting')
 
@@ -674,13 +820,19 @@ export function GameScene() {
   const validAttackTiles = new Set(
     [...getAdjacentTiles(playerPosition)].filter((key) => !buildingTileSet.has(key))
   )
-  const attackPreviewTiles = aliveEnemies.flatMap((e) => {
-    const t = getEnemyAttackTile(e.position, playerPosition)
+  const attackPreviewTiles = enemies.flatMap((e, i) => {
+    if (e.health <= 0) return []
+    const move = enemyMoveTelegraphs[i] ?? e.position
+    const t = getEnemyAttackTileWithPriority(move, playerPosition, buildings)
     return t ? [t] : []
   })
 
   useEffect(() => {
-    if (turn !== 'enemy') return
+    if (totalBuildingHealth <= 0 || playerHealth <= 0) setGameOver(true)
+  }, [totalBuildingHealth, playerHealth])
+
+  useEffect(() => {
+    if (turn !== 'enemy' || gameOver) return
     const t = setTimeout(() => {
       const nextOccupied = new Set<string>([coordKey(playerPosition)])
       buildings.filter((b) => b.health > 0).forEach((b) => nextOccupied.add(coordKey(b.position)))
@@ -703,7 +855,7 @@ export function GameScene() {
       })
       newEnemies.forEach((e) => {
         if (e.health <= 0) return
-        const attackTile = getEnemyAttackTile(e.position, playerPosition)
+        const attackTile = getEnemyAttackTileWithPriority(e.position, playerPosition, buildings)
         if (!attackTile) return
         if (playerPosition[0] === attackTile[0] && playerPosition[1] === attackTile[1]) {
           setPlayerHealth((h) => Math.max(0, h - 1))
@@ -723,7 +875,7 @@ export function GameScene() {
           if (e.health <= 0) return null
           const occ = getOccupiedTiles(playerPosition, newEnemies, buildings, MOUNTAINS)
           occ.delete(coordKey(e.position))
-          const { move } = getEnemyTelegraphs(e.position, playerPosition, occ)
+          const { move } = getEnemyTelegraphs(e.position, playerPosition, occ, buildings)
           return move
         })
       )
@@ -732,10 +884,10 @@ export function GameScene() {
       setTurn('player')
     }, ENEMY_TURN_DURATION_MS)
     return () => clearTimeout(t)
-  }, [turn])
+  }, [turn, gameOver])
 
   const handleMovePlayer = (row: number, col: number) => {
-    if (turn !== 'player' || playerPhase !== 'move' || !canMoveThisTurn) return
+    if (gameOver || turn !== 'player' || playerPhase !== 'move' || !canMoveThisTurn) return
     const valid = getValidMoveTiles(playerPosition, occupiedTiles)
     if (valid.has(`${row},${col}`)) {
       setPlayerFacing(facingFromMove(playerPosition, [row, col]))
@@ -746,7 +898,7 @@ export function GameScene() {
   }
 
   const handlePlayerAttack = (row: number, col: number) => {
-    if (turn !== 'player' || playerPhase !== 'attack') return
+    if (gameOver || turn !== 'player' || playerPhase !== 'attack') return
     if (!validAttackTiles.has(`${row},${col}`)) return
     const hitIndex = enemies.findIndex((e) => e.position[0] === row && e.position[1] === col)
     if (hitIndex < 0) {
@@ -793,25 +945,56 @@ export function GameScene() {
   }
 
   const handleCancelAttackPhase = () => {
-    if (turn === 'player' && playerPhase === 'attack') {
+    if (gameOver || turn !== 'player') return
+    if (playerPhase === 'move') {
+      // Skip remaining movement and go straight to attack phase
+      setPlayerPhase('attack')
+      return
+    }
+    if (playerPhase === 'attack') {
+      // Cancel attack phase and end the turn
       setPlayerPhase('move')
       setTurn('enemy')
     }
   }
 
   const handleGoToAttackPhase = () => {
-    if (turn !== 'player' || playerPhase !== 'move') return
+    if (gameOver || turn !== 'player' || playerPhase !== 'move') return
     setPlayerPhase('attack')
   }
 
   const handleEndTurn = () => {
-    if (turn !== 'player' || playerPhase !== 'attack') return
+    if (gameOver || turn !== 'player' || playerPhase !== 'attack') return
     setPlayerPhase('move')
     setTurn('enemy')
   }
 
+  const handleRestart = () => {
+    setGameOver(false)
+    setTurn('player')
+    setPlayerPhase('move')
+    setPlayerPosition(INITIAL_PLAYER)
+    setPlayerFacing(INITIAL_PLAYER_FACING)
+    setPlayerHealth(MAX_HEALTH)
+    setEnemies(INITIAL_ENEMIES.map((e) => ({ ...e })))
+    setEnemyMoveTelegraphs(
+      INITIAL_ENEMIES.map((e, i) => {
+        const others = INITIAL_ENEMIES.filter((_, j) => j !== i)
+        const occ = getOccupiedTiles(INITIAL_PLAYER, others, INITIAL_BUILDINGS, MOUNTAINS)
+        occ.delete(coordKey(e.position))
+        const { move } = getEnemyTelegraphs(e.position, INITIAL_PLAYER, occ, INITIAL_BUILDINGS)
+        return move
+      })
+    )
+    setPlayerShakeUntil(0)
+    setPlayerRemoved(false)
+    setBuildings(INITIAL_BUILDINGS.map((b) => ({ ...b })))
+    setPlayerHasMovedThisTurn(false)
+    setCursorMode('selecting')
+  }
+
   const handleHoverTile = (row: number, col: number, ctx: { isValidMove: boolean; isValidAttack: boolean }) => {
-    if (row < 0 || col < 0) {
+    if (gameOver || row < 0 || col < 0) {
       setCursorMode('selecting')
       return
     }
@@ -851,6 +1034,7 @@ export function GameScene() {
           enemies={enemies}
           buildings={buildings}
           attackPreviewTiles={attackPreviewTiles}
+          enemyMoveTelegraphs={enemyMoveTelegraphs}
           occupiedTiles={occupiedTiles}
           canMoveThisTurn={canMoveThisTurn}
           validAttackTiles={validAttackTiles}
@@ -858,9 +1042,10 @@ export function GameScene() {
           onPlayerAttack={handlePlayerAttack}
           onHoverTile={handleHoverTile}
           onPlayerShakeComplete={() => setPlayerRemoved(true)}
-          onEnemyShakeComplete={(index) => {
-            setEnemies((prev) => prev.filter((_, i) => i !== index))
-            setEnemyMoveTelegraphs((prev) => prev.filter((_, i) => i !== index))
+          onEnemyShakeComplete={(positionKey) => {
+            const idx = enemiesRef.current.findIndex((e) => coordKey(e.position) === positionKey)
+            setEnemies((prev) => prev.filter((e) => coordKey(e.position) !== positionKey))
+            setEnemyMoveTelegraphs((prev) => (idx >= 0 ? prev.filter((_, i) => i !== idx) : prev))
           }}
         />
       </Canvas>
@@ -875,11 +1060,11 @@ export function GameScene() {
             </span>
           )}
           <div className="healthStrip">
-            <span className="healthStripLabel">HP</span>
-            {Array.from({ length: MAX_HEALTH }, (_, i) => (
+            <span className="healthStripLabel">Bases</span>
+            {Array.from({ length: MAX_BUILDING_HEALTH_TOTAL }, (_, i) => (
               <div
                 key={i}
-                className={`healthSegment ${i < playerHealth ? 'filled' : 'empty'}`}
+                className={`healthSegment ${i < totalBuildingHealth ? 'filled' : 'empty'}`}
                 aria-hidden
               />
             ))}
@@ -905,6 +1090,19 @@ export function GameScene() {
           </p>
         </div>
       </header>
+      {gameOver && (
+        <div className="gameOverOverlay" role="dialog" aria-modal="true" aria-labelledby="game-over-title">
+          <div className="gameOverWindow">
+            <h2 id="game-over-title" className="gameOverTitle">Game Over</h2>
+            <p className="gameOverMessage">
+              {playerHealth <= 0 ? 'Your mech has been destroyed.' : 'All bases have been destroyed.'}
+            </p>
+            <button type="button" className="restartBtn" onClick={handleRestart}>
+              Restart
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
